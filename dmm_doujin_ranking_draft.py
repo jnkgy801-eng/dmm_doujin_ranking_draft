@@ -105,56 +105,60 @@ def resolve_floor_code():
         sys.exit(1)
 
     sites = data.get('result', {}).get('site', [])
-    candidates = []  # (site_name, service_name, floor_id, floor_code, floor_name)
+    candidates = []  # (site_code, service_code, floor_id, floor_code, floor_name, site_name, service_name)
 
     for site in sites:
+        site_code = site.get('code', site.get('name', ''))
         site_name = site.get('name', '')
         for service in site.get('service', []):
+            service_code = service.get('code', service.get('name', ''))
             service_name = service.get('name', '')
             for floor in service.get('floor', []):
                 candidates.append((
-                    site_name,
-                    service_name,
+                    site_code,
+                    service_code,
                     floor.get('id'),
                     floor.get('code'),
                     floor.get('name'),
+                    site_name,
+                    service_name,
                 ))
 
-    # 1) service名がDMM_FLOORと完全一致するもの（site名は問わない。FANZA/DMM.co.jp等の表記ゆれに対応）
-    for site_name, service_name, floor_id, floor_code, floor_name in candidates:
-        if service_name == DMM_FLOOR:
-            return site_name, service_name, floor_code
+    # 1) service名(表示名)またはservice_code が DMM_FLOOR と完全一致するもの
+    for site_code, service_code, floor_id, floor_code, floor_name, site_name, service_name in candidates:
+        if service_code == DMM_FLOOR or service_name == DMM_FLOOR:
+            return site_code, service_code, floor_code
 
     # 2) floorコード自体がDMM_FLOORと一致するもの
-    for site_name, service_name, floor_id, floor_code, floor_name in candidates:
+    for site_code, service_code, floor_id, floor_code, floor_name, site_name, service_name in candidates:
         if floor_code == DMM_FLOOR:
-            return site_name, service_name, floor_code
+            return site_code, service_code, floor_code
 
-    # 3) service名にDMM_FLOORが部分一致するもの（例: "doujin" が service名や floor名に含まれる）
-    for site_name, service_name, floor_id, floor_code, floor_name in candidates:
-        haystack = f'{service_name} {floor_code} {floor_name}'.lower()
+    # 3) service名/floor名にDMM_FLOORが部分一致するもの
+    for site_code, service_code, floor_id, floor_code, floor_name, site_name, service_name in candidates:
+        haystack = f'{service_code} {service_name} {floor_code} {floor_name}'.lower()
         if DMM_FLOOR.lower() in haystack:
-            return site_name, service_name, floor_code
+            return site_code, service_code, floor_code
 
     print(f'❌ service/floor = "{DMM_FLOOR}" が見つかりませんでした。')
-    all_site_names = sorted(set(c[0] for c in candidates))
+    all_site_names = sorted(set(f'{c[5]}({c[0]})' for c in candidates))
     print(f'   FloorListから取得できた site 一覧: {all_site_names}')
     print('   取得できた site/service/floor の一覧（全件）:')
-    for site_name, service_name, floor_id, floor_code, floor_name in candidates:
-        print(f'   - site={site_name:<12} service={service_name:<15} floor={floor_code:<15} ({floor_name})')
+    for site_code, service_code, floor_id, floor_code, floor_name, site_name, service_name in candidates:
+        print(f'   - site={site_code}({site_name})  service={service_code}({service_name})  floor={floor_code}({floor_name})')
     sys.exit(1)
 
 
 def fetch_ranking(hits=FETCH_HITS):
     """DMM ItemList APIから人気順（rank）の同人ランキングを取得する。"""
-    site_name, service_name, floor_code = resolve_floor_code()
-    print(f'ℹ️ 使用する site={site_name} / service={service_name} / floor={floor_code}')
+    site_code, service_code, floor_code = resolve_floor_code()
+    print(f'ℹ️ 使用する site={site_code} / service={service_code} / floor={floor_code}')
 
     params = {
         'api_id': DMM_API_ID,
         'affiliate_id': DMM_AFFILIATE_ID,
-        'site': site_name,
-        'service': service_name,
+        'site': site_code,
+        'service': service_code,
         'floor': floor_code,
         'hits': hits,
         'sort': 'rank',
