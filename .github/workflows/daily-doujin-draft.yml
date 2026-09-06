@@ -44,16 +44,23 @@ jobs:
           python dmm_doujin_ranking_draft.py | tee outputs/draft_$(date +%Y-%m-%d).txt
 
       - name: 下書きをArtifactとしてアップロード
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: doujin-draft-${{ github.run_id }}
           path: outputs/draft_*.txt
           retention-days: 14
+          if-no-files-found: warn
 
       - name: 重複判定用の履歴ファイルをコミット
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add outputs/dmm_doujin_ranking_history.json
-          git diff --cached --quiet || git commit -m "chore: 同人ランキング投稿履歴を更新"
-          git push
+          if [ -f outputs/dmm_doujin_ranking_history.json ]; then
+            git add outputs/dmm_doujin_ranking_history.json
+            git diff --cached --quiet || git commit -m "chore: 同人ランキング投稿履歴を更新"
+            git push
+          else
+            echo "履歴ファイルが存在しないためコミットをスキップします（スクリプトがエラー終了した可能性があります）"
+          fi
