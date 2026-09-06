@@ -1,18 +1,19 @@
 """
-🏆 DMM同人ランキング → X投稿下書き生成ツール（Buffer 新API対応版）
+🏆 DMM同人ランキング → X本投稿ツール（Buffer 新API・自動公開版）
 ================================================================
 DMM Webサービス（アフィリエイト）APIの ItemList エンドポイントから
-「同人」カテゴリーの人気ランキングを取得し、上位5件（既出作品は除外して繰り下げ）分の
-X投稿用スレッド下書き（テキスト）をコンソールに出力します。
+「同人」カテゴリーの人気ランキングを取得し、上位3件（既出作品は除外して繰り下げ）分の
+X投稿用スレッドをコンソールに出力し、Buffer連携が有効な場合はBufferのキューに
+登録して自動公開します。
 
-⚠️ 重要：このスクリプトはX（Twitter）への自動"公開"を一切行いません。
-   BUFFER_API_KEY / BUFFER_CHANNEL_IDS を設定した場合、生成した下書きを
-   Buffer（https://buffer.com）のキューに「下書き（draft・未公開・承認待ち）」として
-   自動送信しますが、実際にXへ公開する最終操作は必ずBuffer管理画面上で
-   人間が内容を確認・承認してから行ってください。
+⚠️ 重要：BUFFER_API_KEY / BUFFER_CHANNEL_IDS を設定すると、生成したスレッドは
+   人間の承認を挟まずBufferのキューに登録され、Buffer側の投稿スケジュールに従って
+   自動的にXへ公開されます（saveToDraft=false）。公開前に人間が内容を確認する
+   ステップは存在しないため、実行前に投稿内容・アカウント設定を十分確認してください。
 
-   ※ 送信時は必ず saveToDraft: true を指定します（下書き保存。公開はしない）。
-      この挙動は環境変数等で変更できない仕様にしてあります（安全のため）。
+   ※ Xの自動化ポリシー・成人向けコンテンツポリシーに抵触するリスクがあるため、
+      本番運用する場合はアカウント側の設定（センシティブコンテンツ表示設定等）や
+      Xの利用規約を事前にご確認ください。
 
    ※ 旧Buffer Publish API（api.bufferapp.com/1/...）は2025年1月3日をもって
       廃止されており、現在は新しいBuffer API（GraphQL, https://api.buffer.com,
@@ -21,17 +22,16 @@ X投稿用スレッド下書き（テキスト）をコンソールに出力し�
 
    ※ 新Buffer APIはXの「返信スレッド」をネイティブにサポートしています
       （createPost の metadata.twitter.thread フィールド）。そのため本スクリプトは
-      1作品＝1回の createPost 呼び出しで、5投稿を正式なスレッドとして
-      下書き登録します（旧版のように5件バラバラの独立投稿にはなりません）。
+      1作品＝1回の createPost 呼び出しで、5投稿を正式なスレッドとして登録します。
       ※ Buffer APIは現状ベータ版のため、仕様が変更される可能性があります。
         実行前に https://developers.buffer.com/ で最新仕様をご確認ください。
 
 ■ 投稿スレッド構成（1作品あたり5投稿＝1スレッド）
-  投稿1（メイン）   : サンプル画像1枚目 + 作品タイトル等
-  リプライ2         : サンプル画像2枚目
-  リプライ3         : サンプル画像3枚目
-  リプライ4         : サンプル画像4枚目
-  リプライ5         : サンプル画像5枚目 + アフィリエイトURL
+  投稿1（メイン）   : サンプル画像1枚目 + 作品タイトル + (1/5)
+  リプライ2         : サンプル画像2枚目 + (2/5)
+  リプライ3         : サンプル画像3枚目 + (3/5)
+  リプライ4         : サンプル画像4枚目 + (4/5)
+  リプライ5         : サンプル画像5枚目 + アフィリエイトURL + (5/5)
 
 ■ 必須環境変数
   DMM_API_ID        : DMM Webサービスの API ID
@@ -39,7 +39,7 @@ X投稿用スレッド下書き（テキスト）をコンソールに出力し�
 
 ■ 任意環境変数
   DMM_FLOOR         : 検索対象フロア（デフォルト 'doujin'）
-  RANK_COUNT        : 何位まで下書きを作るか（デフォルト 5）
+  RANK_COUNT        : 1日に何件（何位まで）投稿するか（デフォルト 3）
   FETCH_HITS        : APIから一度に取得する件数（デフォルト 30。重複除外後に5件残らない場合は増やす）
   HISTORY_KEEP_DAYS : 重複判定のため投稿済み履歴を保持する日数（デフォルト 30）
   OUTPUT_DIR        : 下書きファイルの出力先（デフォルト ./outputs）
@@ -65,7 +65,7 @@ from pathlib import Path
 DMM_API_ID = os.environ.get('DMM_API_ID', '').strip()
 DMM_AFFILIATE_ID = os.environ.get('DMM_AFFILIATE_ID', '').strip()
 DMM_FLOOR = os.environ.get('DMM_FLOOR', 'doujin').strip()
-RANK_COUNT = int(os.environ.get('RANK_COUNT', '5'))
+RANK_COUNT = int(os.environ.get('RANK_COUNT', '3'))
 FETCH_HITS = int(os.environ.get('FETCH_HITS', '30'))
 HISTORY_KEEP_DAYS = int(os.environ.get('HISTORY_KEEP_DAYS', '30'))
 
@@ -76,10 +76,10 @@ BUFFER_CHANNEL_IDS = [
 ]
 BUFFER_ENABLED = bool(BUFFER_API_KEY and BUFFER_CHANNEL_IDS)
 BUFFER_GRAPHQL_ENDPOINT = 'https://api.buffer.com'
-# 安全のため意図的に固定値。環境変数等で変更不可にしてある。
-# True の場合、Buffer側のポストステータスは 'scheduled'/'buffer' ではなく 'draft' になり、
-# 明示的にキューへ移動されるまで公開されない。
-BUFFER_SAVE_AS_DRAFT = True
+# False: 下書き保存ではなく、Bufferのキューに正式なポストとして追加する。
+# schedulingType='automatic' のため、Buffer側の投稿スケジュール（プランごとの
+# 投稿時間枠）に従って自動的に公開される。人間の承認ステップは挟まらない。
+BUFFER_SAVE_AS_DRAFT = False
 
 DMM_API_ENDPOINT = 'https://api.dmm.com/affiliate/v3/ItemList'
 DMM_FLOORLIST_ENDPOINT = 'https://api.dmm.com/affiliate/v3/FloorList'
@@ -269,23 +269,23 @@ def build_thread_draft(rank, item):
         images.append(None)  # 画像なし（プレースホルダー）
 
     posts = []
-    # 投稿1（メイン）
+    # 投稿1（メイン）：タイトル + 何番目の投稿か (1/5)
     posts.append({
         'label': '投稿1（メイン）',
-        'text': f'【本日の同人ランキング {rank}位】\n{title}',
+        'text': f'{title}\n(1/5)',
         'image': images[0],
     })
-    # リプライ2〜4
+    # リプライ2〜4：何番目の投稿か (n/5) のみ
     for i in range(1, 4):
         posts.append({
             'label': f'リプライ{i + 1}',
-            'text': '',
+            'text': f'({i + 1}/5)',
             'image': images[i],
         })
-    # リプライ5（アフィリエイトURL付き）
+    # リプライ5（アフィリエイトURL付き + (5/5)）
     posts.append({
         'label': 'リプライ5',
-        'text': f'▼詳細・購入はこちら\n{affiliate_url}',
+        'text': f'▼詳細・購入はこちら\n{affiliate_url}\n(5/5)',
         'image': images[4],
     })
 
@@ -306,7 +306,7 @@ def print_thread_draft(rank, item, posts):
 
 # ================================================================
 # 🧵 Buffer連携（新API / GraphQL）
-#    下書き（saveToDraft=true）としてのみ登録。即時公開は行わない。
+#    saveToDraft=false でBufferキューに登録し、自動公開する。
 # ================================================================
 
 def buffer_graphql_request(query, variables=None):
@@ -386,10 +386,12 @@ def build_thread_metadata(posts):
 
 def send_thread_to_buffer(rank, posts, channel_id):
     """スレッド1本分（5投稿）を、1回の createPost 呼び出しで
-    Xの正式なリプライスレッドとして下書き（draft）登録する。
+    Xの正式なリプライスレッドとしてBufferのキューに登録し、自動公開する。
 
     ※ Buffer new API は metadata.twitter.thread によりスレッドをネイティブに
-       サポートしているため、旧版のように5件バラバラの独立投稿にはならない。
+       サポートしているため、5件バラバラの独立投稿にはならない。
+    ※ saveToDraft=false のため、Buffer側の投稿スケジュールに従って
+       人間の承認なしに自動的にXへ公開される。
     """
     thread_items = build_thread_metadata(posts)
     if not thread_items:
@@ -415,7 +417,7 @@ def send_thread_to_buffer(rank, posts, channel_id):
         }
     }
 
-    print(f'\n📤 {rank}位の下書き（{len(thread_items)}投稿スレッド）をBufferに送信中（下書き・未公開）...')
+    print(f'\n📤 {rank}位（{len(thread_items)}投稿スレッド）をBufferに送信中（自動公開）...')
     ok, result = buffer_graphql_request(CREATE_THREADED_DRAFT_POST_MUTATION, variables)
     if not ok:
         print(f'   ❌ 送信失敗: {result}')
@@ -428,7 +430,7 @@ def send_thread_to_buffer(rank, posts, channel_id):
         return False, create_result['message']
 
     post = create_result.get('post', {})
-    print(f'   ✅ 下書き登録成功: post_id={post.get("id")} status={post.get("status")}')
+    print(f'   ✅ Bufferキュー登録成功: post_id={post.get("id")} status={post.get("status")}')
     return True, post
 
 
@@ -441,13 +443,13 @@ def main():
     used_ids = {h['content_id'] for h in history}
 
     print('=' * 60)
-    print(f'📋 DMM同人ランキング下書き生成（対象: 上位{RANK_COUNT}件・重複除外）')
+    print(f'📋 DMM同人ランキング投稿生成（対象: 上位{RANK_COUNT}件・重複除外）')
     print('=' * 60)
 
     if BUFFER_ENABLED:
         print(
             f'🧵 Buffer連携: 有効（新API/GraphQL、送信先チャンネル数: {len(BUFFER_CHANNEL_IDS)}、'
-            f'常に saveToDraft=true で送信）'
+            f'saveToDraft={BUFFER_SAVE_AS_DRAFT}＝自動公開）'
         )
     else:
         print('🧵 Buffer連携: 無効（BUFFER_API_KEY / BUFFER_CHANNEL_IDS 未設定。コンソール出力のみ）')
@@ -486,10 +488,10 @@ def main():
     save_history(history)
 
     print('\n' + '=' * 60)
-    print(f'✅ 完了: {len(picked)}件の下書きをコンソールに出力しました（Xへの自動公開はしていません）。')
+    print(f'✅ 完了: {len(picked)}件の投稿内容をコンソールに出力しました。')
     if BUFFER_ENABLED:
-        print('   Bufferに「下書き（draft・未公開）」として登録済みです。')
-        print('   必ずBuffer管理画面で内容を確認・承認してから公開してください。')
+        print('   Bufferのキューに登録済みです。Buffer側の投稿スケジュールに従って')
+        print('   自動的にXへ公開されます（人間の承認ステップはありません）。')
     else:
         print('   内容を確認のうえ、手動でXに投稿してください。')
     print(f'📚 履歴ファイル（重複判定用）: {HISTORY_FILE}')
