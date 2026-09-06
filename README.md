@@ -1,0 +1,2 @@
+# dmm_doujin_ranking_draft
+ひかるのXアカウントでfanzaの同人作品のアフィリエイト投稿を行う
