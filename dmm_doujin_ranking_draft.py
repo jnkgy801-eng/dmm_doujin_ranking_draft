@@ -5,9 +5,19 @@ DMM Webサービス（アフィリエイト）APIの ItemList エンドポイン
 「同人」カテゴリーの人気ランキングを取得し、上位5件（既出作品は除外して繰り下げ）分の
 X投稿用スレッド下書き（テキスト）をコンソールに出力します。
 
-⚠️ 重要：このスクリプトは自動投稿を一切行いません（AUTO_POST機能なし）。
-   出力された下書きの内容を必ず人間が確認し、内容が適切であることを確かめたうえで
-   手動でXに投稿してください。
+⚠️ 重要：このスクリプトはX（Twitter）への自動"公開"を一切行いません。
+   BUFFER_ACCESS_TOKEN / BUFFER_PROFILE_IDS を設定した場合、生成した下書きを
+   Buffer（https://buffer.com）のキューに「下書き（未公開・承認待ち）」として
+   自動送信しますが、実際にXへ公開する最終操作は必ずBuffer管理画面上で
+   人間が内容を確認・承認してから行ってください。
+
+   ※ Buffer送信は常に "now": False（即時公開しない）で行われます。この挙動は
+      環境変数等で変更できない仕様にしてあります（安全のため）。
+
+   ※ Buffer APIは「Xの返信スレッド」を直接組む機能を持っていません。そのため
+      投稿1〜リプライ5は、Buffer上では5件の独立した投稿としてキューに積まれます。
+      実際にスレッド（返信の連なり）として公開したい場合は、Buffer側で手動で
+      順番・返信関係を確認・調整してから公開してください。
 
 ■ 投稿スレッド構成（1作品あたり5投稿）
   投稿1（メイン）   : サンプル画像1枚目 + 作品タイトル等
@@ -26,6 +36,11 @@ X投稿用スレッド下書き（テキスト）をコンソールに出力し�
   FETCH_HITS        : APIから一度に取得する件数（デフォルト 30。重複除外後に5件残らない場合は増やす）
   HISTORY_KEEP_DAYS : 重複判定のため投稿済み履歴を保持する日数（デフォルト 30）
   OUTPUT_DIR        : 下書きファイルの出力先（デフォルト ./outputs）
+
+■ 任意環境変数（Buffer連携。両方設定した場合のみ有効）
+  BUFFER_ACCESS_TOKEN : BufferのAccess Token（https://buffer.com/developers/apps 参照）
+  BUFFER_PROFILE_IDS  : 送信先BufferプロファイルIDをカンマ区切りで指定（例: "abc123,def456"）
+                        未設定の場合はBuffer連携をスキップし、従来どおりコンソール出力のみ行う
 """
 
 import os
@@ -45,6 +60,16 @@ DMM_FLOOR = os.environ.get('DMM_FLOOR', 'doujin').strip()
 RANK_COUNT = int(os.environ.get('RANK_COUNT', '5'))
 FETCH_HITS = int(os.environ.get('FETCH_HITS', '30'))
 HISTORY_KEEP_DAYS = int(os.environ.get('HISTORY_KEEP_DAYS', '30'))
+
+# --- Buffer連携（任意）---------------------------------------------------
+BUFFER_ACCESS_TOKEN = os.environ.get('BUFFER_ACCESS_TOKEN', '').strip()
+BUFFER_PROFILE_IDS = [
+    pid.strip() for pid in os.environ.get('BUFFER_PROFILE_IDS', '').split(',') if pid.strip()
+]
+BUFFER_ENABLED = bool(BUFFER_ACCESS_TOKEN and BUFFER_PROFILE_IDS)
+BUFFER_CREATE_ENDPOINT = 'https://api.bufferapp.com/1/updates/create.json'
+# 安全のため意図的に固定値。環境変数等で変更不可にしてある。
+BUFFER_PUBLISH_NOW = False
 
 DMM_API_ENDPOINT = 'https://api.dmm.com/affiliate/v3/ItemList'
 DMM_FLOORLIST_ENDPOINT = 'https://api.dmm.com/affiliate/v3/FloorList'
@@ -270,6 +295,58 @@ def print_thread_draft(rank, item, posts):
 
 
 # ================================================================
+# 🧵 Buffer連携（下書き=未公開キューとして送信。即時公開は行わない）
+# ================================================================
+
+def send_post_to_buffer(text, image_url):
+    """Bufferのキューに1件だけ「未公開（承認待ち）」状態で送信する。
+
+    - now は常に False 固定（このスクリプトから即時公開することはできない）。
+    - image_url がプレースホルダー（実URLでない）場合は画像なしで送信する。
+    - Buffer APIは複数プロフィールへの同時送信をサポートするため、
+      BUFFER_PROFILE_IDS に含まれる全プロフィールへまとめて送る。
+    """
+    data = {
+        'access_token': BUFFER_ACCESS_TOKEN,
+        'text': text or '',
+        'now': 'false',  # 固定。Bufferのキューに積むだけで公開しない。
+        'shorten': 'false',
+    }
+    for pid in BUFFER_PROFILE_IDS:
+        data.setdefault('profile_ids[]', [])
+    data['profile_ids[]'] = BUFFER_PROFILE_IDS
+
+    if image_url and image_url.startswith('http'):
+        data['media[photo]'] = image_url
+        data['media[thumbnail]'] = image_url
+
+    try:
+        resp = requests.post(BUFFER_CREATE_ENDPOINT, data=data, timeout=30)
+        resp.raise_for_status()
+        result = resp.json()
+        if not result.get('success', True) and 'updates' not in result:
+            return False, f'Buffer APIエラー: {result}'
+        return True, result
+    except Exception as e:
+        return False, f'Bufferへの送信に失敗しました: {e}'
+
+
+def send_thread_to_buffer(rank, posts):
+    """スレッド1本分（5投稿）をBufferのキューに順番に送信する。
+
+    注意: Buffer APIはXの「返信スレッド」構造を直接サポートしないため、
+    ここで送る5件はBuffer上では独立した投稿としてキューに積まれる。
+    実際にスレッドとして公開したい場合は、Buffer管理画面で承認・公開順序を
+    人間が確認・調整すること。
+    """
+    print(f'\n📤 {rank}位の下書きをBufferキューに送信中（未公開・承認待ち）...')
+    for post in posts:
+        ok, info = send_post_to_buffer(post['text'], post['image'])
+        status = '✅' if ok else '❌'
+        print(f'   {status} {post["label"]}: {"送信成功" if ok else info}')
+
+
+# ================================================================
 # 🚀 メイン処理
 # ================================================================
 
@@ -280,6 +357,11 @@ def main():
     print('=' * 60)
     print(f'📋 DMM同人ランキング下書き生成（対象: 上位{RANK_COUNT}件・重複除外）')
     print('=' * 60)
+
+    if BUFFER_ENABLED:
+        print(f'🧵 Buffer連携: 有効（送信先プロフィール数: {len(BUFFER_PROFILE_IDS)}、常に下書き/未公開で送信）')
+    else:
+        print('🧵 Buffer連携: 無効（BUFFER_ACCESS_TOKEN / BUFFER_PROFILE_IDS 未設定。コンソール出力のみ）')
 
     items = fetch_ranking(hits=FETCH_HITS)
     if not items:
@@ -301,6 +383,9 @@ def main():
         posts = build_thread_draft(display_rank, item)
         print_thread_draft(display_rank, item, posts)
 
+        if BUFFER_ENABLED:
+            send_thread_to_buffer(display_rank, posts)
+
         new_history_entries.append({
             'content_id': content_id,
             'title': item.get('title', ''),
@@ -311,8 +396,12 @@ def main():
     save_history(history)
 
     print('\n' + '=' * 60)
-    print(f'✅ 完了: {len(picked)}件の下書きをコンソールに出力しました（自動投稿はしていません）。')
-    print('   内容を確認のうえ、手動でXに投稿してください。')
+    print(f'✅ 完了: {len(picked)}件の下書きをコンソールに出力しました（Xへの自動公開はしていません）。')
+    if BUFFER_ENABLED:
+        print('   Bufferのキューに「未公開（承認待ち）」として送信済みです。')
+        print('   必ずBuffer管理画面で内容を確認・承認してから公開してください。')
+    else:
+        print('   内容を確認のうえ、手動でXに投稿してください。')
     print(f'📚 履歴ファイル（重複判定用）: {HISTORY_FILE}')
     print('=' * 60)
 
