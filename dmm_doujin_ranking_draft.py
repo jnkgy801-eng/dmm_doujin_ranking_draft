@@ -99,12 +99,17 @@ def fetch_ranking(hits=FETCH_HITS):
         'sort': 'rank',
         'output': 'json',
     }
+    resp = requests.get(DMM_API_ENDPOINT, params=params, timeout=30)
+    if resp.status_code != 200:
+        print(f'❌ DMM APIへのリクエストに失敗しました: {resp.status_code} {resp.reason}')
+        print(f'   リクエストURL: {resp.url}')
+        print(f'   レスポンス本文: {resp.text[:1000]}')
+        sys.exit(1)
     try:
-        resp = requests.get(DMM_API_ENDPOINT, params=params, timeout=30)
-        resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        print(f'❌ DMM APIへのリクエストに失敗しました: {e}')
+        print(f'❌ レスポンスのJSON解析に失敗しました: {e}')
+        print(f'   レスポンス本文: {resp.text[:1000]}')
         sys.exit(1)
 
     result = data.get('result', {})
