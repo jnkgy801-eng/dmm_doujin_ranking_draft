@@ -120,33 +120,40 @@ def resolve_floor_code():
                     floor.get('name'),
                 ))
 
-    # 1) site=FANZA かつ service名がDMM_FLOORと完全一致するものを優先
+    # 1) service名がDMM_FLOORと完全一致するもの（site名は問わない。FANZA/DMM.co.jp等の表記ゆれに対応）
     for site_name, service_name, floor_id, floor_code, floor_name in candidates:
-        if site_name == 'FANZA' and service_name == DMM_FLOOR:
-            return service_name, floor_code
+        if service_name == DMM_FLOOR:
+            return site_name, service_name, floor_code
 
     # 2) floorコード自体がDMM_FLOORと一致するもの
     for site_name, service_name, floor_id, floor_code, floor_name in candidates:
-        if site_name == 'FANZA' and floor_code == DMM_FLOOR:
-            return service_name, floor_code
+        if floor_code == DMM_FLOOR:
+            return site_name, service_name, floor_code
 
-    print(f'❌ site=FANZA 内に service/floor = "{DMM_FLOOR}" が見つかりませんでした。')
-    print('   利用可能な FANZA の service / floor 一覧:')
+    # 3) service名にDMM_FLOORが部分一致するもの（例: "doujin" が service名や floor名に含まれる）
     for site_name, service_name, floor_id, floor_code, floor_name in candidates:
-        if site_name == 'FANZA':
-            print(f'   - service={service_name:<15} floor={floor_code:<15} ({floor_name})')
+        haystack = f'{service_name} {floor_code} {floor_name}'.lower()
+        if DMM_FLOOR.lower() in haystack:
+            return site_name, service_name, floor_code
+
+    print(f'❌ service/floor = "{DMM_FLOOR}" が見つかりませんでした。')
+    all_site_names = sorted(set(c[0] for c in candidates))
+    print(f'   FloorListから取得できた site 一覧: {all_site_names}')
+    print('   取得できた site/service/floor の一覧（全件）:')
+    for site_name, service_name, floor_id, floor_code, floor_name in candidates:
+        print(f'   - site={site_name:<12} service={service_name:<15} floor={floor_code:<15} ({floor_name})')
     sys.exit(1)
 
 
 def fetch_ranking(hits=FETCH_HITS):
     """DMM ItemList APIから人気順（rank）の同人ランキングを取得する。"""
-    service_name, floor_code = resolve_floor_code()
-    print(f'ℹ️ 使用する service={service_name} / floor={floor_code}')
+    site_name, service_name, floor_code = resolve_floor_code()
+    print(f'ℹ️ 使用する site={site_name} / service={service_name} / floor={floor_code}')
 
     params = {
         'api_id': DMM_API_ID,
         'affiliate_id': DMM_AFFILIATE_ID,
-        'site': 'FANZA',
+        'site': site_name,
         'service': service_name,
         'floor': floor_code,
         'hits': hits,
