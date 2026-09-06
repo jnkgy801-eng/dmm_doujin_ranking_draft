@@ -28,6 +28,9 @@ jobs:
       - name: 依存ライブラリをインストール
         run: pip install requests
 
+      - name: 出力先ディレクトリを作成
+        run: mkdir -p outputs
+
       - name: 下書き生成スクリプトを実行
         env:
           DMM_API_ID: ${{ secrets.DMM_API_ID }}
