@@ -47,6 +47,7 @@ FETCH_HITS = int(os.environ.get('FETCH_HITS', '30'))
 HISTORY_KEEP_DAYS = int(os.environ.get('HISTORY_KEEP_DAYS', '30'))
 
 DMM_API_ENDPOINT = 'https://api.dmm.com/affiliate/v3/ItemList'
+DMM_FLOORLIST_ENDPOINT = 'https://api.dmm.com/affiliate/v3/FloorList'
 IMAGES_PER_ITEM = 5  # 投稿1本 + リプライ4本 = 5枚使用
 
 if not DMM_API_ID or not DMM_AFFILIATE_ID:
@@ -87,14 +88,67 @@ def save_history(history):
 # 🌐 DMM API 呼び出し
 # ================================================================
 
+def resolve_floor_code():
+    """FloorList APIから site=FANZA / service(またはfloor)=DMM_FLOOR に対応する
+    正式な service名 と floorコードを取得する。見つからない場合は候補一覧を表示して終了する。"""
+    params = {
+        'api_id': DMM_API_ID,
+        'affiliate_id': DMM_AFFILIATE_ID,
+        'output': 'json',
+    }
+    try:
+        resp = requests.get(DMM_FLOORLIST_ENDPOINT, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f'❌ FloorList APIへのリクエストに失敗しました: {e}')
+        sys.exit(1)
+
+    sites = data.get('result', {}).get('site', [])
+    candidates = []  # (site_name, service_name, floor_id, floor_code, floor_name)
+
+    for site in sites:
+        site_name = site.get('name', '')
+        for service in site.get('service', []):
+            service_name = service.get('name', '')
+            for floor in service.get('floor', []):
+                candidates.append((
+                    site_name,
+                    service_name,
+                    floor.get('id'),
+                    floor.get('code'),
+                    floor.get('name'),
+                ))
+
+    # 1) site=FANZA かつ service名がDMM_FLOORと完全一致するものを優先
+    for site_name, service_name, floor_id, floor_code, floor_name in candidates:
+        if site_name == 'FANZA' and service_name == DMM_FLOOR:
+            return service_name, floor_code
+
+    # 2) floorコード自体がDMM_FLOORと一致するもの
+    for site_name, service_name, floor_id, floor_code, floor_name in candidates:
+        if site_name == 'FANZA' and floor_code == DMM_FLOOR:
+            return service_name, floor_code
+
+    print(f'❌ site=FANZA 内に service/floor = "{DMM_FLOOR}" が見つかりませんでした。')
+    print('   利用可能な FANZA の service / floor 一覧:')
+    for site_name, service_name, floor_id, floor_code, floor_name in candidates:
+        if site_name == 'FANZA':
+            print(f'   - service={service_name:<15} floor={floor_code:<15} ({floor_name})')
+    sys.exit(1)
+
+
 def fetch_ranking(hits=FETCH_HITS):
     """DMM ItemList APIから人気順（rank）の同人ランキングを取得する。"""
+    service_name, floor_code = resolve_floor_code()
+    print(f'ℹ️ 使用する service={service_name} / floor={floor_code}')
+
     params = {
         'api_id': DMM_API_ID,
         'affiliate_id': DMM_AFFILIATE_ID,
         'site': 'FANZA',
-        'service': 'doujin',
-        'floor': DMM_FLOOR,
+        'service': service_name,
+        'floor': floor_code,
         'hits': hits,
         'sort': 'rank',
         'output': 'json',
