@@ -1,25 +1,32 @@
 """
-🏆 DMM同人ランキング → X投稿下書き生成ツール
+🏆 DMM同人ランキング → X投稿下書き生成ツール（Buffer 新API対応版）
 ================================================================
 DMM Webサービス（アフィリエイト）APIの ItemList エンドポイントから
 「同人」カテゴリーの人気ランキングを取得し、上位5件（既出作品は除外して繰り下げ）分の
 X投稿用スレッド下書き（テキスト）をコンソールに出力します。
 
 ⚠️ 重要：このスクリプトはX（Twitter）への自動"公開"を一切行いません。
-   BUFFER_ACCESS_TOKEN / BUFFER_PROFILE_IDS を設定した場合、生成した下書きを
-   Buffer（https://buffer.com）のキューに「下書き（未公開・承認待ち）」として
+   BUFFER_API_KEY / BUFFER_CHANNEL_IDS を設定した場合、生成した下書きを
+   Buffer（https://buffer.com）のキューに「下書き（draft・未公開・承認待ち）」として
    自動送信しますが、実際にXへ公開する最終操作は必ずBuffer管理画面上で
    人間が内容を確認・承認してから行ってください。
 
-   ※ Buffer送信は常に "now": False（即時公開しない）で行われます。この挙動は
-      環境変数等で変更できない仕様にしてあります（安全のため）。
+   ※ 送信時は必ず saveToDraft: true を指定します（下書き保存。公開はしない）。
+      この挙動は環境変数等で変更できない仕様にしてあります（安全のため）。
 
-   ※ Buffer APIは「Xの返信スレッド」を直接組む機能を持っていません。そのため
-      投稿1〜リプライ5は、Buffer上では5件の独立した投稿としてキューに積まれます。
-      実際にスレッド（返信の連なり）として公開したい場合は、Buffer側で手動で
-      順番・返信関係を確認・調整してから公開してください。
+   ※ 旧Buffer Publish API（api.bufferapp.com/1/...）は2025年1月3日をもって
+      廃止されており、現在は新しいBuffer API（GraphQL, https://api.buffer.com,
+      Bearer認証, 個人APIキーは https://publish.buffer.com/settings/api で発行）
+      に統一されています。本スクリプトはこの新API向けに実装されています。
 
-■ 投稿スレッド構成（1作品あたり5投稿）
+   ※ 新Buffer APIはXの「返信スレッド」をネイティブにサポートしています
+      （createPost の metadata.twitter.thread フィールド）。そのため本スクリプトは
+      1作品＝1回の createPost 呼び出しで、5投稿を正式なスレッドとして
+      下書き登録します（旧版のように5件バラバラの独立投稿にはなりません）。
+      ※ Buffer APIは現状ベータ版のため、仕様が変更される可能性があります。
+        実行前に https://developers.buffer.com/ で最新仕様をご確認ください。
+
+■ 投稿スレッド構成（1作品あたり5投稿＝1スレッド）
   投稿1（メイン）   : サンプル画像1枚目 + 作品タイトル等
   リプライ2         : サンプル画像2枚目
   リプライ3         : サンプル画像3枚目
@@ -38,9 +45,10 @@ X投稿用スレッド下書き（テキスト）をコンソールに出力し�
   OUTPUT_DIR        : 下書きファイルの出力先（デフォルト ./outputs）
 
 ■ 任意環境変数（Buffer連携。両方設定した場合のみ有効）
-  BUFFER_ACCESS_TOKEN : BufferのAccess Token（https://buffer.com/developers/apps 参照）
-  BUFFER_PROFILE_IDS  : 送信先BufferプロファイルIDをカンマ区切りで指定（例: "abc123,def456"）
-                        未設定の場合はBuffer連携をスキップし、従来どおりコンソール出力のみ行う
+  BUFFER_API_KEY      : Buffer個人APIキー（https://publish.buffer.com/settings/api で発行）
+  BUFFER_CHANNEL_IDS  : 送信先BufferチャンネルID（Xチャンネル）をカンマ区切りで指定
+                        （チャンネルIDは GraphQL の `channels` クエリで取得可能。
+                          未設定の場合はBuffer連携をスキップし、従来どおりコンソール出力のみ行う）
 """
 
 import os
@@ -61,15 +69,17 @@ RANK_COUNT = int(os.environ.get('RANK_COUNT', '5'))
 FETCH_HITS = int(os.environ.get('FETCH_HITS', '30'))
 HISTORY_KEEP_DAYS = int(os.environ.get('HISTORY_KEEP_DAYS', '30'))
 
-# --- Buffer連携（任意）---------------------------------------------------
-BUFFER_ACCESS_TOKEN = os.environ.get('BUFFER_ACCESS_TOKEN', '').strip()
-BUFFER_PROFILE_IDS = [
-    pid.strip() for pid in os.environ.get('BUFFER_PROFILE_IDS', '').split(',') if pid.strip()
+# --- Buffer連携（任意・新API/GraphQL版）-----------------------------------
+BUFFER_API_KEY = os.environ.get('BUFFER_API_KEY', '').strip()
+BUFFER_CHANNEL_IDS = [
+    cid.strip() for cid in os.environ.get('BUFFER_CHANNEL_IDS', '').split(',') if cid.strip()
 ]
-BUFFER_ENABLED = bool(BUFFER_ACCESS_TOKEN and BUFFER_PROFILE_IDS)
-BUFFER_CREATE_ENDPOINT = 'https://api.bufferapp.com/1/updates/create.json'
+BUFFER_ENABLED = bool(BUFFER_API_KEY and BUFFER_CHANNEL_IDS)
+BUFFER_GRAPHQL_ENDPOINT = 'https://api.buffer.com'
 # 安全のため意図的に固定値。環境変数等で変更不可にしてある。
-BUFFER_PUBLISH_NOW = False
+# True の場合、Buffer側のポストステータスは 'scheduled'/'buffer' ではなく 'draft' になり、
+# 明示的にキューへ移動されるまで公開されない。
+BUFFER_SAVE_AS_DRAFT = True
 
 DMM_API_ENDPOINT = 'https://api.dmm.com/affiliate/v3/ItemList'
 DMM_FLOORLIST_ENDPOINT = 'https://api.dmm.com/affiliate/v3/FloorList'
@@ -255,13 +265,14 @@ def build_thread_draft(rank, item):
     affiliate_url = item.get('affiliateURL') or item.get('URL', '')
     images = extract_sample_images(item)
 
+    has_real_image = list(images)  # 実URLがあるかどうかの判定用に元のリストを保持
     while len(images) < IMAGES_PER_ITEM:
-        images.append('(サンプル画像なし)')
+        images.append(None)  # 画像なし（プレースホルダー）
 
     posts = []
     # 投稿1（メイン）
     posts.append({
-        'label': f'投稿1（メイン）',
+        'label': '投稿1（メイン）',
         'text': f'【本日の同人ランキング {rank}位】\n{title}',
         'image': images[0],
     })
@@ -291,59 +302,135 @@ def print_thread_draft(rank, item, posts):
         print(f'\n  ▶ {p["label"]}')
         if p['text']:
             print(f'    本文: {p["text"]}')
-        print(f'    画像: {p["image"]}')
+        print(f'    画像: {p["image"] or "(サンプル画像なし)"}')
 
 
 # ================================================================
-# 🧵 Buffer連携（下書き=未公開キューとして送信。即時公開は行わない）
+# 🧵 Buffer連携（新API / GraphQL）
+#    下書き（saveToDraft=true）としてのみ登録。即時公開は行わない。
 # ================================================================
 
-def send_post_to_buffer(text, image_url):
-    """Bufferのキューに1件だけ「未公開（承認待ち）」状態で送信する。
+def buffer_graphql_request(query, variables=None):
+    """Buffer GraphQL APIへリクエストを送る共通関数。
 
-    - now は常に False 固定（このスクリプトから即時公開することはできない）。
-    - image_url がプレースホルダー（実URLでない）場合は画像なしで送信する。
-    - Buffer APIは複数プロフィールへの同時送信をサポートするため、
-      BUFFER_PROFILE_IDS に含まれる全プロフィールへまとめて送る。
+    GraphQLの流儀上、HTTPレベルのエラー（認証エラー等）以外は常に200が返り、
+    エラー情報は response['errors'] や MutationError として返ってくる点に注意。
     """
-    data = {
-        'access_token': BUFFER_ACCESS_TOKEN,
-        'text': text or '',
-        'now': 'false',  # 固定。Bufferのキューに積むだけで公開しない。
-        'shorten': 'false',
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {BUFFER_API_KEY}',
     }
-    for pid in BUFFER_PROFILE_IDS:
-        data.setdefault('profile_ids[]', [])
-    data['profile_ids[]'] = BUFFER_PROFILE_IDS
+    payload = {'query': query, 'variables': variables or {}}
+    try:
+        resp = requests.post(BUFFER_GRAPHQL_ENDPOINT, headers=headers, json=payload, timeout=30)
+    except Exception as e:
+        return False, f'Buffer APIへの接続に失敗しました: {e}'
 
-    if image_url and image_url.startswith('http'):
-        data['media[photo]'] = image_url
-        data['media[thumbnail]'] = image_url
+    if resp.status_code != 200:
+        return False, f'Buffer APIがHTTP {resp.status_code} を返しました: {resp.text[:500]}'
 
     try:
-        resp = requests.post(BUFFER_CREATE_ENDPOINT, data=data, timeout=30)
-        resp.raise_for_status()
-        result = resp.json()
-        if not result.get('success', True) and 'updates' not in result:
-            return False, f'Buffer APIエラー: {result}'
-        return True, result
+        data = resp.json()
     except Exception as e:
-        return False, f'Bufferへの送信に失敗しました: {e}'
+        return False, f'Buffer APIレスポンスのJSON解析に失敗しました: {e}'
+
+    if 'errors' in data and data['errors']:
+        # システムレベルのGraphQLエラー（認証エラー・レート制限等）
+        codes = [err.get('extensions', {}).get('code') for err in data['errors']]
+        messages = [err.get('message', '') for err in data['errors']]
+        return False, f'Buffer APIエラー（{codes}）: {messages}'
+
+    return True, data.get('data', {})
 
 
-def send_thread_to_buffer(rank, posts):
-    """スレッド1本分（5投稿）をBufferのキューに順番に送信する。
+CREATE_THREADED_DRAFT_POST_MUTATION = """
+mutation CreateThreadedDraftPost($input: CreatePostInput!) {
+  createPost(input: $input) {
+    ... on PostActionSuccess {
+      post {
+        id
+        status
+      }
+    }
+    ... on MutationError {
+      message
+    }
+  }
+}
+"""
 
-    注意: Buffer APIはXの「返信スレッド」構造を直接サポートしないため、
-    ここで送る5件はBuffer上では独立した投稿としてキューに積まれる。
-    実際にスレッドとして公開したい場合は、Buffer管理画面で承認・公開順序を
-    人間が確認・調整すること。
+
+def _asset_input_for_image(image_url):
+    """新Buffer API（[AssetInput!]形式）向けに画像1枚をassets要素に変換する。
+    プレースホルダー（実URLでない）場合はNoneを返し、呼び出し側で除外する。
     """
-    print(f'\n📤 {rank}位の下書きをBufferキューに送信中（未公開・承認待ち）...')
+    if image_url and image_url.startswith('http'):
+        return {'image': {'url': image_url}}
+    return None
+
+
+def build_thread_metadata(posts):
+    """postsのリストから、Buffer new API の metadata.twitter.thread 用の
+    ThreadedPostInput配列を組み立てる。"""
+    thread_items = []
     for post in posts:
-        ok, info = send_post_to_buffer(post['text'], post['image'])
-        status = '✅' if ok else '❌'
-        print(f'   {status} {post["label"]}: {"送信成功" if ok else info}')
+        assets = []
+        asset = _asset_input_for_image(post.get('image'))
+        if asset:
+            assets.append(asset)
+        thread_items.append({
+            'text': post['text'],
+            'assets': assets,
+        })
+    return thread_items
+
+
+def send_thread_to_buffer(rank, posts, channel_id):
+    """スレッド1本分（5投稿）を、1回の createPost 呼び出しで
+    Xの正式なリプライスレッドとして下書き（draft）登録する。
+
+    ※ Buffer new API は metadata.twitter.thread によりスレッドをネイティブに
+       サポートしているため、旧版のように5件バラバラの独立投稿にはならない。
+    """
+    thread_items = build_thread_metadata(posts)
+    if not thread_items:
+        return False, 'スレッド項目の組み立てに失敗しました。'
+
+    # トップレベルの text / assets はスレッド先頭の投稿と一致させる仕様
+    first_text = thread_items[0]['text']
+    first_assets = thread_items[0]['assets']
+
+    variables = {
+        'input': {
+            'text': first_text,
+            'channelId': channel_id,
+            'schedulingType': 'automatic',
+            'mode': 'addToQueue',
+            'saveToDraft': BUFFER_SAVE_AS_DRAFT,
+            'assets': first_assets,
+            'metadata': {
+                'twitter': {
+                    'thread': thread_items,
+                }
+            },
+        }
+    }
+
+    print(f'\n📤 {rank}位の下書き（{len(thread_items)}投稿スレッド）をBufferに送信中（下書き・未公開）...')
+    ok, result = buffer_graphql_request(CREATE_THREADED_DRAFT_POST_MUTATION, variables)
+    if not ok:
+        print(f'   ❌ 送信失敗: {result}')
+        return False, result
+
+    create_result = result.get('createPost', {})
+    if 'message' in create_result:
+        # MutationError（Buffer側のバリデーションエラー等）
+        print(f'   ❌ Buffer側でエラー: {create_result["message"]}')
+        return False, create_result['message']
+
+    post = create_result.get('post', {})
+    print(f'   ✅ 下書き登録成功: post_id={post.get("id")} status={post.get("status")}')
+    return True, post
 
 
 # ================================================================
@@ -359,9 +446,12 @@ def main():
     print('=' * 60)
 
     if BUFFER_ENABLED:
-        print(f'🧵 Buffer連携: 有効（送信先プロフィール数: {len(BUFFER_PROFILE_IDS)}、常に下書き/未公開で送信）')
+        print(
+            f'🧵 Buffer連携: 有効（新API/GraphQL、送信先チャンネル数: {len(BUFFER_CHANNEL_IDS)}、'
+            f'常に saveToDraft=true で送信）'
+        )
     else:
-        print('🧵 Buffer連携: 無効（BUFFER_ACCESS_TOKEN / BUFFER_PROFILE_IDS 未設定。コンソール出力のみ）')
+        print('🧵 Buffer連携: 無効（BUFFER_API_KEY / BUFFER_CHANNEL_IDS 未設定。コンソール出力のみ）')
 
     items = fetch_ranking(hits=FETCH_HITS)
     if not items:
@@ -384,7 +474,8 @@ def main():
         print_thread_draft(display_rank, item, posts)
 
         if BUFFER_ENABLED:
-            send_thread_to_buffer(display_rank, posts)
+            for channel_id in BUFFER_CHANNEL_IDS:
+                send_thread_to_buffer(display_rank, posts, channel_id)
 
         new_history_entries.append({
             'content_id': content_id,
@@ -398,7 +489,7 @@ def main():
     print('\n' + '=' * 60)
     print(f'✅ 完了: {len(picked)}件の下書きをコンソールに出力しました（Xへの自動公開はしていません）。')
     if BUFFER_ENABLED:
-        print('   Bufferのキューに「未公開（承認待ち）」として送信済みです。')
+        print('   Bufferに「下書き（draft・未公開）」として登録済みです。')
         print('   必ずBuffer管理画面で内容を確認・承認してから公開してください。')
     else:
         print('   内容を確認のうえ、手動でXに投稿してください。')
