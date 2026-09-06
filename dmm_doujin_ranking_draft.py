@@ -265,7 +265,6 @@ def build_thread_draft(rank, item):
     affiliate_url = item.get('affiliateURL') or item.get('URL', '')
     images = extract_sample_images(item)
 
-    has_real_image = list(images)  # 実URLがあるかどうかの判定用に元のリストを保持
     while len(images) < IMAGES_PER_ITEM:
         images.append(None)  # 画像なし（プレースホルダー）
 
