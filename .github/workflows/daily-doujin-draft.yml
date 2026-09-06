@@ -1,0 +1,56 @@
+name: DMM同人ランキング下書き生成
+
+# ⚠️ このワークフローは下書き生成のみを行います。X（Twitter）への自動投稿は一切行いません。
+#    生成された下書きは Artifact としてアップロードされるので、必ず人間が中身を確認してから
+#    手動でXに投稿してください。
+
+on:
+  schedule:
+    # 毎日 08:00 JST (=UTC 23:00 前日) に実行。時間を変えたい場合はここを編集してください。
+    - cron: '0 23 * * *'
+  workflow_dispatch: {}  # 手動実行もできるようにしておく
+
+permissions:
+  contents: write  # 重複除外用の履歴ファイルをコミットし直すために必要
+
+jobs:
+  generate-draft:
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Python セットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 依存ライブラリをインストール
+        run: pip install requests
+
+      - name: 下書き生成スクリプトを実行
+        env:
+          DMM_API_ID: ${{ secrets.DMM_API_ID }}
+          DMM_AFFILIATE_ID: ${{ secrets.DMM_AFFILIATE_ID }}
+          OUTPUT_DIR: ${{ github.workspace }}/outputs
+          # 必要に応じて調整してください
+          RANK_COUNT: '5'
+          FETCH_HITS: '30'
+          HISTORY_KEEP_DAYS: '30'
+        run: |
+          python dmm_doujin_ranking_draft.py | tee outputs/draft_$(date +%Y-%m-%d).txt
+
+      - name: 下書きをArtifactとしてアップロード
+        uses: actions/upload-artifact@v4
+        with:
+          name: doujin-draft-${{ github.run_id }}
+          path: outputs/draft_*.txt
+          retention-days: 14
+
+      - name: 重複判定用の履歴ファイルをコミット
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add outputs/dmm_doujin_ranking_history.json
+          git diff --cached --quiet || git commit -m "chore: 同人ランキング投稿履歴を更新"
+          git push
